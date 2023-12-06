@@ -22,7 +22,7 @@ import (
 
 	internalapi "github.com/openkruise/kruise-tools/pkg/api"
 	internalpolymorphichelpers "github.com/openkruise/kruise-tools/pkg/internal/polymorphichelpers"
-
+	kruiserolloutsv1apha1 "github.com/openkruise/rollouts/api/v1alpha1"
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/printers"
@@ -67,7 +67,10 @@ var (
 		kubectl-kruise rollout undo daemonset/abc --to-revision=3
 
 		# Rollback to the previous deployment with dry-run
-		kubectl-kruise rollout undo --dry-run=server deployment/abc`)
+		kubectl-kruise rollout undo --dry-run=server deployment/abc
+		
+		# Rollback to workload via rollout api object
+		kubectl-kruise rollout undo rollout/abc`)
 )
 
 // NewRolloutUndoOptions returns an initialized UndoOptions instance
@@ -83,7 +86,7 @@ func NewRolloutUndoOptions(streams genericclioptions.IOStreams) *UndoOptions {
 func NewCmdRolloutUndo(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	o := NewRolloutUndoOptions(streams)
 
-	validArgs := []string{"deployment", "daemonset", "statefulset", "cloneset", "advanced statefulset"}
+	validArgs := []string{"deployment", "daemonset", "statefulset", "cloneset", "advanced statefulset", "rollout"}
 
 	cmd := &cobra.Command{
 		Use:                   "undo (TYPE NAME | TYPE/NAME) [flags]",
@@ -148,8 +151,51 @@ func (o *UndoOptions) Validate() error {
 	return nil
 }
 
+func (o *UndoOptions) CheckRollout() error {
+	r := o.Builder().
+		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
+		NamespaceParam(o.Namespace).DefaultNamespace().
+		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
+		ResourceTypeOrNameArgs(true, o.Resources...). //Set Resources
+		ContinueOnError().
+		Latest(). // Latest will fetch the latest copy of any objects loaded from URLs or files from the server.
+		Flatten().
+		Do() //Do returns a Result object with a Visitor for the resources
+	if err := r.Err(); err != nil {
+		return err
+	}
+
+	infos, err := r.Infos()
+	if err != nil {
+		return err
+	}
+	var RefResources []string
+	for _, info := range infos {
+		obj := info.Object
+		ro, ok := obj.(*kruiserolloutsv1apha1.Rollout)
+		if !ok {
+			continue
+		}
+		ResourceTypeAndName := ro.Spec.ObjectRef.WorkloadRef.Kind + "/" + ro.Spec.ObjectRef.WorkloadRef.Name
+		printer, err := o.ToPrinter(fmt.Sprintf("refers to %s", ResourceTypeAndName))
+		if err != nil {
+			return err
+		}
+		err = printer.PrintObj(info.Object, o.Out)
+		if err != nil {
+			return err
+		}
+		RefResources = append(RefResources, ResourceTypeAndName)
+	}
+	//REVIEW - is deduplication needed?
+	o.Resources = append(o.Resources, RefResources...)
+	return nil
+}
+
 // RunUndo performs the execution of 'rollout undo' sub command
 func (o *UndoOptions) RunUndo() error {
+	//TODO - resources except Rollout are retrieved twice, could we recognize Rollout before retrieving?
+	o.CheckRollout()
 	r := o.Builder().
 		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		NamespaceParam(o.Namespace).DefaultNamespace().
@@ -164,6 +210,10 @@ func (o *UndoOptions) RunUndo() error {
 	}
 
 	err := r.Visit(func(info *resource.Info, err error) error {
+		// no need to visit the rollout object, while rollbacker for rollout is implemented for further use
+		if info.Mapping.Resource.Group == "rollouts.kruise.io" && info.Mapping.Resource.Resource == "rollouts" {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
