@@ -151,69 +151,65 @@ func (o *UndoOptions) Validate() error {
 	return nil
 }
 
-func (o *UndoOptions) CheckRollout() error {
-	r := o.Builder().
-		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
-		NamespaceParam(o.Namespace).DefaultNamespace().
-		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
-		ResourceTypeOrNameArgs(true, o.Resources...). //Set Resources
-		ContinueOnError().
-		Latest(). // Latest will fetch the latest copy of any objects loaded from URLs or files from the server.
-		Flatten().
-		Do() //Do returns a Result object with a Visitor for the resources
-	if err := r.Err(); err != nil {
-		return err
-	}
+// func (o *UndoOptions) CheckRollout() error {
+// 	r := o.Builder().
+// 		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
+// 		NamespaceParam(o.Namespace).DefaultNamespace().
+// 		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
+// 		ResourceTypeOrNameArgs(true, o.Resources...). //Set Resources
+// 		ContinueOnError().
+// 		Latest(). // Latest will fetch the latest copy of any objects loaded from URLs or files from the server.
+// 		Flatten().
+// 		Do() //Do returns a Result object with a Visitor for the resources
+// 	if err := r.Err(); err != nil {
+// 		return err
+// 	}
 
-	infos, err := r.Infos()
-	if err != nil {
-		return err
-	}
-	var RefResources []string
-	for _, info := range infos {
-		obj := info.Object
-		ro, ok := obj.(*kruiserolloutsv1apha1.Rollout)
-		if !ok {
-			continue
-		}
-		ResourceTypeAndName := ro.Spec.ObjectRef.WorkloadRef.Kind + "/" + ro.Spec.ObjectRef.WorkloadRef.Name
-		printer, err := o.ToPrinter(fmt.Sprintf("refers to %s", ResourceTypeAndName))
-		if err != nil {
-			return err
-		}
-		err = printer.PrintObj(info.Object, o.Out)
-		if err != nil {
-			return err
-		}
-		RefResources = append(RefResources, ResourceTypeAndName)
-	}
-	//REVIEW - is deduplication needed?
-	o.Resources = append(o.Resources, RefResources...)
-	return nil
-}
+// 	infos, err := r.Infos()
+// 	if err != nil {
+// 		return err
+// 	}
+// 	var RefResources []string
+// 	for _, info := range infos {
+// 		obj := info.Object
+// 		ro, ok := obj.(*kruiserolloutsv1apha1.Rollout)
+// 		if !ok {
+// 			continue
+// 		}
+// 		ResourceTypeAndName := ro.Spec.ObjectRef.WorkloadRef.Kind + "/" + ro.Spec.ObjectRef.WorkloadRef.Name
+// 		printer, err := o.ToPrinter(fmt.Sprintf("refers to %s", ResourceTypeAndName))
+// 		if err != nil {
+// 			return err
+// 		}
+// 		err = printer.PrintObj(info.Object, o.Out)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		RefResources = append(RefResources, ResourceTypeAndName)
+// 	}
+// 	//REVIEW - is deduplication needed?
+// 	o.Resources = append(o.Resources, RefResources...)
+// 	return nil
+// }
 
 // RunUndo performs the execution of 'rollout undo' sub command
 func (o *UndoOptions) RunUndo() error {
-	//TODO - resources except Rollout are retrieved twice, could we recognize Rollout before retrieving?
-	o.CheckRollout()
-	r := o.Builder().
+	b := o.Builder().
 		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		NamespaceParam(o.Namespace).DefaultNamespace().
 		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
 		ResourceTypeOrNameArgs(true, o.Resources...).
 		ContinueOnError().
 		Latest().
-		Flatten().
-		Do()
+		Flatten()
+	r := b.Do()
 	if err := r.Err(); err != nil {
 		return err
 	}
 
-	err := r.Visit(func(info *resource.Info, err error) error {
-		// no need to visit the rollout object, while rollbacker for rollout is implemented for further use
-		if info.Mapping.Resource.Group == "rollouts.kruise.io" && info.Mapping.Resource.Resource == "rollouts" {
-			return nil
-		}
+	var RefResources []string
+	// perform undo logic here
+	undoFunc := func(info *resource.Info, err error) error {
 		if err != nil {
 			return err
 		}
@@ -238,7 +234,48 @@ func (o *UndoOptions) RunUndo() error {
 		}
 
 		return printer.PrintObj(info.Object, o.Out)
+	}
+
+	//提取workload放到slice里面，加去重，并且直接undo非rollout对象了
+	err := r.Visit(func(info *resource.Info, err error) error {
+		if info.Mapping.Resource.Group == "rollouts.kruise.io" && info.Mapping.Resource.Resource == "rollouts" {
+			//提取workload放到slice里面
+			obj := info.Object
+			ro, ok := obj.(*kruiserolloutsv1apha1.Rollout)
+			if !ok {
+				//TODO - 返回什么错误呢？
+				return nil
+			}
+			//TODO - 不要用这种很傻的方法。。。
+			ResourceTypeAndName := ro.Spec.ObjectRef.WorkloadRef.Kind + "/" + ro.Spec.ObjectRef.WorkloadRef.Name
+			printer, err := o.ToPrinter(fmt.Sprintf("refers to %s", ResourceTypeAndName))
+			if err != nil {
+				return err
+			}
+			err = printer.PrintObj(info.Object, o.Out)
+			if err != nil {
+				return err
+			}
+			RefResources = append(RefResources, ResourceTypeAndName)
+			return nil
+		}
+
+		return undoFunc(info, err)
 	})
+	//TODO - 错误处理
+	if err != nil {
+		return err
+	}
+	//TODO - 去重，比较RefResources中是否包含了o.Resources，如果是，从列表中去除，大小写？直接判断？
+
+	//TODO - 去重之后，检查一下RefResources是否为空，如果是，直接返回就行了
+
+	//REVIEW - 访问refered workload， 如果这样有问题的话就从头搭建一个builder就行了
+	b.ResourceTypeOrNameArgs(true, RefResources...).Do()
+	if err = r.Err(); err != nil {
+		return err
+	}
+	err = r.Visit(undoFunc)
 
 	return err
 }
