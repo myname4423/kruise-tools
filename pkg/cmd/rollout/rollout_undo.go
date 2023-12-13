@@ -165,7 +165,46 @@ func (o *UndoOptions) Validate() error {
 // 	if err := r.Err(); err != nil {
 // 		return err
 // 	}
+// func (o *UndoOptions) CheckRollout() error {
+// 	r := o.Builder().
+// 		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
+// 		NamespaceParam(o.Namespace).DefaultNamespace().
+// 		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
+// 		ResourceTypeOrNameArgs(true, o.Resources...). //Set Resources
+// 		ContinueOnError().
+// 		Latest(). // Latest will fetch the latest copy of any objects loaded from URLs or files from the server.
+// 		Flatten().
+// 		Do() //Do returns a Result object with a Visitor for the resources
+// 	if err := r.Err(); err != nil {
+// 		return err
+// 	}
 
+// 	infos, err := r.Infos()
+// 	if err != nil {
+// 		return err
+// 	}
+// 	var RefResources []string
+// 	for _, info := range infos {
+// 		obj := info.Object
+// 		ro, ok := obj.(*kruiserolloutsv1apha1.Rollout)
+// 		if !ok {
+// 			continue
+// 		}
+// 		ResourceTypeAndName := ro.Spec.ObjectRef.WorkloadRef.Kind + "/" + ro.Spec.ObjectRef.WorkloadRef.Name
+// 		printer, err := o.ToPrinter(fmt.Sprintf("refers to %s", ResourceTypeAndName))
+// 		if err != nil {
+// 			return err
+// 		}
+// 		err = printer.PrintObj(info.Object, o.Out)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		RefResources = append(RefResources, ResourceTypeAndName)
+// 	}
+// 	//REVIEW - is deduplication needed?
+// 	o.Resources = append(o.Resources, RefResources...)
+// 	return nil
+// }
 // 	infos, err := r.Infos()
 // 	if err != nil {
 // 		return err
