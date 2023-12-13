@@ -304,10 +304,9 @@ func (o *UndoOptions) RunUndo() error {
 				return err
 			}
 			gvk := &schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: workloadRef.Kind}
-			deDuplicaKey := gvk.String() + workloadRef.Name
+			deDuplicaKey := gvk.String() + "/" + workloadRef.Name
 			if _, ok := deDuplica[deDuplicaKey]; ok {
-				fmt.Println("出现重复了，不允许在一次rollout undo命令中对同一个对象多次undo")
-				return fmt.Errorf("出现重复了，不允许在一次rollout undo命令中对同一个对象多次undo")
+				return fmt.Errorf("multiple undo operations on the same workload (%s) is not allowed", deDuplicaKey)
 			}
 
 			resourceIdentifier := workloadRef.Kind + "." + gv.Version + "." + gv.Group + "/" + workloadRef.Name
@@ -323,11 +322,9 @@ func (o *UndoOptions) RunUndo() error {
 			refResources = append(refResources, resourceIdentifier)
 			return nil
 		} else {
-			deDuplicaKey := info.Mapping.GroupVersionKind.String() + info.Name
-			//去除本身的重复
+			deDuplicaKey := info.Mapping.GroupVersionKind.String() + "/" + info.Name
 			if _, ok := deDuplica[deDuplicaKey]; ok {
-				fmt.Println("出现重复了，不允许在一次rollout undo命令中对同一个对象多次undo")
-				return fmt.Errorf("出现重复了，不允许在一次rollout undo命令中对同一个对象多次undo")
+				return fmt.Errorf("multiple undo operations on the same workload (%s) is not allowed", deDuplicaKey)
 			}
 			deDuplica[deDuplicaKey] = struct{}{}
 		}
