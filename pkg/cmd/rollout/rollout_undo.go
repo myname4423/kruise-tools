@@ -24,6 +24,7 @@ import (
 	internalpolymorphichelpers "github.com/openkruise/kruise-tools/pkg/internal/polymorphichelpers"
 	kruiserolloutsv1apha1 "github.com/openkruise/rollouts/api/v1alpha1"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
@@ -151,51 +152,49 @@ func (o *UndoOptions) Validate() error {
 	return nil
 }
 
-func (o *UndoOptions) CheckRollout() error {
-	r := o.Builder().
-		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
-		NamespaceParam(o.Namespace).DefaultNamespace().
-		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
-		ResourceTypeOrNameArgs(true, o.Resources...). //Set Resources
-		ContinueOnError().
-		Latest(). // Latest will fetch the latest copy of any objects loaded from URLs or files from the server.
-		Flatten().
-		Do() //Do returns a Result object with a Visitor for the resources
-	if err := r.Err(); err != nil {
-		return err
-	}
+// func (o *UndoOptions) CheckRollout() error {
+// 	r := o.Builder().
+// 		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
+// 		NamespaceParam(o.Namespace).DefaultNamespace().
+// 		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
+// 		ResourceTypeOrNameArgs(true, o.Resources...). //Set Resources
+// 		ContinueOnError().
+// 		Latest(). // Latest will fetch the latest copy of any objects loaded from URLs or files from the server.
+// 		Flatten().
+// 		Do() //Do returns a Result object with a Visitor for the resources
+// 	if err := r.Err(); err != nil {
+// 		return err
+// 	}
 
-	infos, err := r.Infos()
-	if err != nil {
-		return err
-	}
-	var RefResources []string
-	for _, info := range infos {
-		obj := info.Object
-		ro, ok := obj.(*kruiserolloutsv1apha1.Rollout)
-		if !ok {
-			continue
-		}
-		ResourceTypeAndName := ro.Spec.ObjectRef.WorkloadRef.Kind + "/" + ro.Spec.ObjectRef.WorkloadRef.Name
-		printer, err := o.ToPrinter(fmt.Sprintf("refers to %s", ResourceTypeAndName))
-		if err != nil {
-			return err
-		}
-		err = printer.PrintObj(info.Object, o.Out)
-		if err != nil {
-			return err
-		}
-		RefResources = append(RefResources, ResourceTypeAndName)
-	}
-	//REVIEW - is deduplication needed?
-	o.Resources = append(o.Resources, RefResources...)
-	return nil
-}
+// 	infos, err := r.Infos()
+// 	if err != nil {
+// 		return err
+// 	}
+// 	var RefResources []string
+// 	for _, info := range infos {
+// 		obj := info.Object
+// 		ro, ok := obj.(*kruiserolloutsv1apha1.Rollout)
+// 		if !ok {
+// 			continue
+// 		}
+// 		ResourceTypeAndName := ro.Spec.ObjectRef.WorkloadRef.Kind + "/" + ro.Spec.ObjectRef.WorkloadRef.Name
+// 		printer, err := o.ToPrinter(fmt.Sprintf("refers to %s", ResourceTypeAndName))
+// 		if err != nil {
+// 			return err
+// 		}
+// 		err = printer.PrintObj(info.Object, o.Out)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		RefResources = append(RefResources, ResourceTypeAndName)
+// 	}
+// 	//REVIEW - is deduplication needed?
+// 	o.Resources = append(o.Resources, RefResources...)
+// 	return nil
+// }
 
 // RunUndo performs the execution of 'rollout undo' sub command
 func (o *UndoOptions) RunUndo() error {
-	//TODO - resources except Rollout are retrieved twice, could we recognize Rollout before retrieving?
-	o.CheckRollout()
 	r := o.Builder().
 		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		NamespaceParam(o.Namespace).DefaultNamespace().
@@ -203,17 +202,13 @@ func (o *UndoOptions) RunUndo() error {
 		ResourceTypeOrNameArgs(true, o.Resources...).
 		ContinueOnError().
 		Latest().
-		Flatten().
-		Do()
+		Flatten().Do()
 	if err := r.Err(); err != nil {
 		return err
 	}
 
-	err := r.Visit(func(info *resource.Info, err error) error {
-		// no need to visit the rollout object, while rollbacker for rollout is implemented for further use
-		if info.Mapping.Resource.Group == "rollouts.kruise.io" && info.Mapping.Resource.Resource == "rollouts" {
-			return nil
-		}
+	// perform undo logic here
+	undoFunc := func(info *resource.Info, err error) error {
 		if err != nil {
 			return err
 		}
@@ -238,7 +233,89 @@ func (o *UndoOptions) RunUndo() error {
 		}
 
 		return printer.PrintObj(info.Object, o.Out)
-	})
+	}
 
-	return err
+	var refResources []string
+	// When multiple rollout objects specified within the arguments reference a single workload (inclusive of the workload itself),
+	// performing multiple undo operations on the workload in a single command is not smart. Such an action could
+	// lead to confusion and yield unintended consequences. Consequently, undo operations in this context are disallowed.
+	// Should such a scenario occur, the system will report an error and only the first argument that points to the workload will be executed.
+	deDuplica := make(map[string]struct{})
+
+	err := r.Visit(func(info *resource.Info, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.Mapping.GroupVersionKind.Group == "rollouts.kruise.io" && info.Mapping.GroupVersionKind.Kind == "Rollout" {
+			obj := info.Object
+			if obj == nil {
+				fmt.Println("Rollout object not found")
+				return fmt.Errorf("Rollout object not found")
+			}
+			ro, ok := obj.(*kruiserolloutsv1apha1.Rollout)
+			if !ok {
+				fmt.Println("unsupported version of Rollout")
+				return fmt.Errorf("unsupported version of Rollout")
+			}
+			workloadRef := ro.Spec.ObjectRef.WorkloadRef
+			gv, err := schema.ParseGroupVersion(workloadRef.APIVersion)
+			if err != nil {
+				return err
+			}
+			gvk := &schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: workloadRef.Kind}
+			deDuplicaKey := gvk.String() + workloadRef.Name
+			if _, ok := deDuplica[deDuplicaKey]; ok {
+				fmt.Println("出现重复了，不允许在一次rollout undo命令中对同一个对象多次undo")
+				return fmt.Errorf("出现重复了，不允许在一次rollout undo命令中对同一个对象多次undo")
+			}
+
+			resourceIdentifier := workloadRef.Kind + "." + gv.Version + "." + gv.Group + "/" + workloadRef.Name
+			printer, err := o.ToPrinter(fmt.Sprintf("references to %s", resourceIdentifier))
+			if err != nil {
+				return err
+			}
+			err = printer.PrintObj(info.Object, o.Out)
+			if err != nil {
+				return err
+			}
+			deDuplica[deDuplicaKey] = struct{}{}
+			refResources = append(refResources, resourceIdentifier)
+			return nil
+		} else {
+			deDuplicaKey := info.Mapping.GroupVersionKind.String() + info.Name
+			//去除本身的重复
+			if _, ok := deDuplica[deDuplicaKey]; ok {
+				fmt.Println("出现重复了，不允许在一次rollout undo命令中对同一个对象多次undo")
+				return fmt.Errorf("出现重复了，不允许在一次rollout undo命令中对同一个对象多次undo")
+			}
+			deDuplica[deDuplicaKey] = struct{}{}
+		}
+
+		return undoFunc(info, nil)
+	})
+	if err != nil {
+		//TODO - 如何集合错误？拼接？
+		// return err
+	}
+
+	if len(refResources) < 1 {
+		return nil
+	}
+
+	//REVIEW - 访问refered workload， 如果这样有问题的话就从头搭建一个builder就行了
+	r2 := o.Builder().
+		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
+		NamespaceParam(o.Namespace).DefaultNamespace().
+		FilenameParam(o.EnforceNamespace, &o.FilenameOptions).
+		ResourceTypeOrNameArgs(true, refResources...).
+		ContinueOnError().
+		Latest().
+		Flatten().Do()
+	if err2 := r2.Err(); err2 != nil {
+		return err2
+	}
+	err2 := r2.Visit(undoFunc)
+
+	return fmt.Errorf(err.Error() + "\n" + err2.Error())
 }
