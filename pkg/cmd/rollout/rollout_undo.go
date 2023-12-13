@@ -25,6 +25,7 @@ import (
 	kruiserolloutsv1apha1 "github.com/openkruise/rollouts/api/v1alpha1"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
@@ -333,16 +334,13 @@ func (o *UndoOptions) RunUndo() error {
 
 		return undoFunc(info, nil)
 	})
-	if err != nil {
-		//TODO - 如何集合错误？拼接？
-		// return err
-	}
 
 	if len(refResources) < 1 {
-		return nil
+		return err
 	}
 
-	//REVIEW - 访问refered workload， 如果这样有问题的话就从头搭建一个builder就行了
+	var aggErrs []error
+	aggErrs = append(aggErrs, err)
 	r2 := o.Builder().
 		WithScheme(internalapi.GetScheme(), scheme.Scheme.PrioritizedVersionsAllGroups()...).
 		NamespaceParam(o.Namespace).DefaultNamespace().
@@ -351,10 +349,12 @@ func (o *UndoOptions) RunUndo() error {
 		ContinueOnError().
 		Latest().
 		Flatten().Do()
-	if err2 := r2.Err(); err2 != nil {
-		return err2
-	}
-	err2 := r2.Visit(undoFunc)
 
-	return fmt.Errorf(err.Error() + "\n" + err2.Error())
+	if err = r2.Err(); err != nil {
+		aggErrs = append(aggErrs, err)
+		return errors.NewAggregate(aggErrs)
+	}
+	err = r2.Visit(undoFunc)
+	aggErrs = append(aggErrs, err)
+	return errors.NewAggregate(aggErrs)
 }
